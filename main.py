@@ -9,7 +9,15 @@ from fastapi.middleware.cors import CORSMiddleware
 APP_NAME='Brass Studio Analysis API';MAX_FILE_SIZE=200*1024*1024;CHUNK_SIZE=1024*1024;ALLOWED_EXTENSIONS={'.mp3','.wav','.m4a'}
 PARTS={'trumpet':{'name':'Trumpet','abbr':'Tpt.','clef':'G','line':2,'diatonic':-1,'chromatic':-2},'trombone':{'name':'Trombone','abbr':'Tbn.','clef':'F','line':4,'diatonic':0,'chromatic':0},'tenor-sax':{'name':'Tenor Sax','abbr':'T. Sax','clef':'G','line':2,'diatonic':-8,'chromatic':-14},'tuba':{'name':'Tuba','abbr':'Tba.','clef':'F','line':4,'diatonic':0,'chromatic':0},'snare-drum':{'name':'Snare Drum','abbr':'S.D.','clef':'percussion','line':2,'diatonic':0,'chromatic':0,'percussion':True},'bass-drum':{'name':'Bass Drum','abbr':'B.D.','clef':'percussion','line':2,'diatonic':0,'chromatic':0,'percussion':True}}
 KEY_NAMES=['C','C♯','D','E♭','E','F','F♯','G','A♭','A','B♭','B'];MAJOR=np.array([6.35,2.23,3.48,2.33,4.38,4.09,2.52,5.19,2.39,3.66,2.29,2.88]);MINOR=np.array([6.33,2.68,3.52,5.38,2.60,3.53,2.54,4.75,3.98,2.69,3.34,3.17]);FIFTHS={0:0,1:7,2:2,3:-3,4:4,5:-1,6:6,7:1,8:-4,9:3,10:-2,11:5}
-app=FastAPI(title=APP_NAME,version='1.3.0');app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['*'],allow_headers=['*'])
+app=FastAPI(title=APP_NAME,version='1.3.0');app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://showta-top3wb.github.io",
+    ],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 @app.get('/')
 async def root():return {'name':APP_NAME,'version':'1.3.0','status':'running'}
 @app.get('/health')
