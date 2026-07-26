@@ -193,7 +193,13 @@ async def health() -> dict[str, str]:
         "status": "ok",
         "version": APP_VERSION,
     }
-
+@app.post("/ping")
+async def ping():
+    return {
+        "status": "ok",
+        "message": "POST received",
+        "version": APP_VERSION,
+    }
 
 def clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
