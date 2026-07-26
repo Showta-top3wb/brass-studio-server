@@ -1,834 +1,135 @@
 from __future__ import annotations
 
+import base64
 import os
 import tempfile
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
+from xml.sax.saxutils import escape
 
 import librosa
 import numpy as np
-import soundfile as sf
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
-
-
-APP_NAME = "Brass Studio Analysis API"
-APP_VERSION = "1.2.0"
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 MAX_FILE_SIZE = 200 * 1024 * 1024
-CHUNK_SIZE = 1024 * 1024
-
-ALLOWED_EXTENSIONS = {
-    ".mp3",
-    ".wav",
-    ".m4a",
+ALLOWED_EXTENSIONS = {'.mp3', '.wav', '.m4a'}
+PARTS = {
+    'trumpet': ('Trumpet', 'Tpt.', 'G', 2, -1, -2, False),
+    'trombone': ('Trombone', 'Tbn.', 'F', 4, 0, 0, False),
+    'tenor-sax': ('Tenor Sax', 'T. Sax', 'G', 2, -8, -14, False),
+    'tuba': ('Tuba', 'Tba.', 'F', 4, 0, 0, False),
+    'snare-drum': ('Snare Drum', 'S.D.', 'percussion', 2, 0, 0, True),
+    'bass-drum': ('Bass Drum', 'B.D.', 'percussion', 2, 0, 0, True),
 }
+KEY_NAMES = ['C','C♯','D','E♭','E','F','F♯','G','A♭','A','B♭','B']
+MAJOR = np.array([6.35,2.23,3.48,2.33,4.38,4.09,2.52,5.19,2.39,3.66,2.29,2.88])
+MINOR = np.array([6.33,2.68,3.52,5.38,2.60,3.53,2.54,4.75,3.98,2.69,3.34,3.17])
+FIFTHS = {0:0,1:7,2:2,3:-3,4:4,5:-1,6:6,7:1,8:-4,9:3,10:-2,11:5}
+app = FastAPI(title='Brass Studio', version='1.1.0')
 
-TARGET_SAMPLE_RATE = 22050
-MAX_ANALYSIS_SECONDS = 300
+@app.get('/health')
+async def health():
+    return {'status':'ok','version':'1.1.0'}
 
+def estimate_key(y: np.ndarray, sr: int):
+    chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
+    avg = np.mean(chroma, axis=1)
+    avg = avg / (np.linalg.norm(avg) + 1e-12)
+    best = (-1.0, 0, 'major')
+    scores = []
+    for root in range(12):
+        for mode, profile in [('major', MAJOR), ('minor', MINOR)]:
+            p = np.roll(profile, root)
+            p = p / np.linalg.norm(p)
+            score = float(np.dot(avg, p))
+            scores.append(score)
+            if score > best[0]: best = (score, root, mode)
+    scores.sort(reverse=True)
+    confidence = max(35, min(92, round(45 + (scores[0]-scores[1])*700)))
+    suffix = 'Major' if best[2] == 'major' else 'Minor'
+    return {'name':f'{KEY_NAMES[best[1]]} {suffix}','mode':best[2],'fifths':FIFTHS[best[1]],'confidence':confidence}
 
-app = FastAPI(
-    title=APP_NAME,
-    version=APP_VERSION,
-)
+def create_musicxml(title: str, bpm: int, key: dict, time_sig: str, measures: int, selected: list[str]):
+    beats, beat_type = map(int, time_sig.split('/'))
+    divisions = 4
+    duration = int(divisions * beats * (4 / beat_type))
+    part_list = []
+    parts_xml = []
+    for i, part_key in enumerate(selected, 1):
+        name, abbr, clef, line, diatonic, chromatic, percussion = PARTS[part_key]
+        part_list.append(f'<score-part id="P{i}"><part-name>{escape(name)}</part-name><part-abbreviation>{escape(abbr)}</part-abbreviation></score-part>')
+        measure_xml = []
+        for m in range(1, measures + 1):
+            attrs = ''
+            if m == 1:
+                transpose = f'<transpose><diatonic>{diatonic}</diatonic><chromatic>{chromatic}</chromatic></transpose>' if chromatic else ''
+                staff = '<staff-details><staff-lines>1</staff-lines></staff-details>' if percussion else ''
+                attrs = f'<attributes><divisions>{divisions}</divisions><key><fifths>{key["fifths"]}</fifths><mode>{key["mode"]}</mode></key><time><beats>{beats}</beats><beat-type>{beat_type}</beat-type></time><clef><sign>{clef}</sign><line>{line}</line></clef>{transpose}{staff}</attributes><direction><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>{bpm}</per-minute></metronome></direction-type><sound tempo="{bpm}"/></direction>'
+            final = '<barline location="right"><bar-style>light-heavy</bar-style></barline>' if m == measures else ''
+            measure_xml.append(f'<measure number="{m}">{attrs}<note><rest measure="yes"/><duration>{duration}</duration><voice>1</voice><type>whole</type></note>{final}</measure>')
+        parts_xml.append(f'<part id="P{i}">{"".join(measure_xml)}</part>')
+    return f'''<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">
+<score-partwise version="4.0"><work><work-title>{escape(title)}</work-title></work><movement-title>{escape(title)}</movement-title><identification><creator type="arranger">Brass Studio</creator><encoding><software>Brass Studio Ver.1.1</software></encoding></identification><part-list>{''.join(part_list)}</part-list>{''.join(parts_xml)}</score-partwise>'''
 
-
-configured_origins = [
-    origin.strip()
-    for origin in os.getenv(
-        "ALLOWED_ORIGINS",
-        "*",
-    ).split(",")
-    if origin.strip()
-]
-
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=configured_origins,
-    allow_credentials=False,
-    allow_methods=[
-        "GET",
-        "POST",
-        "OPTIONS",
-    ],
-    allow_headers=["*"],
-)
-
-
-MAJOR_PROFILE = np.array(
-    [
-        6.35,
-        2.23,
-        3.48,
-        2.33,
-        4.38,
-        4.09,
-        2.52,
-        5.19,
-        2.39,
-        3.66,
-        2.29,
-        2.88,
-    ],
-    dtype=np.float64,
-)
-
-
-MINOR_PROFILE = np.array(
-    [
-        6.33,
-        2.68,
-        3.52,
-        5.38,
-        2.60,
-        3.53,
-        2.54,
-        4.75,
-        3.98,
-        2.69,
-        3.34,
-        3.17,
-    ],
-    dtype=np.float64,
-)
-
-
-KEY_NAMES = [
-    "C",
-    "C♯",
-    "D",
-    "E♭",
-    "E",
-    "F",
-    "F♯",
-    "G",
-    "A♭",
-    "A",
-    "B♭",
-    "B",
-]
-
-
-FIFTHS_BY_ROOT = {
-    0: 0,
-    1: 7,
-    2: 2,
-    3: -3,
-    4: 4,
-    5: -1,
-    6: 6,
-    7: 1,
-    8: -4,
-    9: 3,
-    10: -2,
-    11: 5,
-}
-
-
-@app.get("/")
-async def root() -> dict[str, str]:
-    return {
-        "name": APP_NAME,
-        "version": APP_VERSION,
-        "status": "running",
-    }
-
-
-@app.get("/health")
-async def health() -> dict[str, str]:
-    return {
-        "status": "ok",
-        "version": APP_VERSION,
-    }
-
-
-@app.post("/analyze")
-async def analyze_audio(
-    audio: Annotated[
-        UploadFile,
-        File(...),
-    ],
-) -> dict[str, Any]:
-    filename = audio.filename or "audio"
-    extension = Path(filename).suffix.lower()
-
-    validate_extension(extension)
-
-    temporary_path: str | None = None
-
+@app.post('/analyze')
+async def analyze(audio: Annotated[UploadFile, File(...)], parts: str = 'trumpet,trombone,tenor-sax,tuba,snare-drum,bass-drum', time_signature: str = 'auto', manual_bpm: int | None = None):
+    filename = audio.filename or 'audio'
+    ext = Path(filename).suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(400, 'MP3・WAV・M4Aのみ対応しています')
+    selected = [p for p in parts.split(',') if p in PARTS]
+    if not selected:
+        raise HTTPException(400, '1つ以上のパートを選択してください')
+    temp_path = None
+    size = 0
     try:
-        temporary_path, total_size = (
-            await save_upload_to_temporary_file(
-                audio=audio,
-                extension=extension,
-            )
-        )
-
-        analysis = analyze_file(
-            file_path=temporary_path,
-        )
-
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as f:
+            temp_path = f.name
+            while chunk := await audio.read(1024*1024):
+                size += len(chunk)
+                if size > MAX_FILE_SIZE: raise HTTPException(413, 'ファイルは200MB以下にしてください')
+                f.write(chunk)
+        y, sr = librosa.load(temp_path, sr=22050, mono=True, duration=600)
+        if y.size == 0: raise HTTPException(422, '音声データが見つかりませんでした')
+        duration = float(librosa.get_duration(y=y, sr=sr))
+        onset = librosa.onset.onset_strength(y=y, sr=sr)
+        if manual_bpm is None:
+            tempo, beat_frames = librosa.beat.beat_track(onset_envelope=onset, sr=sr)
+            bpm = int(round(float(np.asarray(tempo).reshape(-1)[0])))
+            beat_times = librosa.frames_to_time(beat_frames, sr=sr)
+            confidence = 35 if len(beat_times) < 4 else max(35, min(92, round(92 - (np.std(np.diff(beat_times))/(np.mean(np.diff(beat_times))+1e-9))*180)))
+        else:
+            bpm = max(40, min(240, int(manual_bpm)))
+            confidence = 100
+        key = estimate_key(y, sr)
+        time_sig = '4/4' if time_signature == 'auto' else time_signature
+        if time_sig not in {'2/4','3/4','4/4','6/8'}: raise HTTPException(400, '拍子設定が不正です')
+        beats, beat_type = map(int, time_sig.split('/'))
+        measure_count = max(1, round((duration*bpm/60)/(beats*(4/beat_type))))
+        title = Path(filename).stem
+        xml = create_musicxml(title, bpm, key, time_sig, measure_count, selected)
         return {
-            "status": "completed",
-            "message": "音源解析が完了しました",
-            "file": {
-                "name": filename,
-                "title": Path(filename).stem,
-                "extension": extension,
-                "sizeBytes": total_size,
-            },
-            "analysis": analysis,
+            'status':'complete',
+            'file':{'name':filename,'sizeBytes':size,'durationSeconds':round(duration,2),'sampleRate':sr},
+            'analysis':{'bpm':bpm,'bpmConfidence':confidence,'key':key['name'],'keyConfidence':key['confidence'],'timeSignature':time_sig,'timeSignatureConfidence':100 if time_signature != 'auto' else 55,'measureCount':measure_count},
+            'selectedParts':selected,
+            'musicxml':{'filename':f'{title}.musicxml','base64':base64.b64encode(xml.encode()).decode()},
+            'notice':'Ver.1.1はBPM・Key・拍子・小節数の解析と、MusicXMLの空スコア生成に対応しています。パート別音符採譜は次段階です。'
         }
-
     except HTTPException:
         raise
-
-    except Exception as error:
-        print(
-            "Analysis error:",
-            repr(error),
-            flush=True,
-        )
-
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "音源を解析できませんでした。"
-                "別のMP3・WAV・M4Aで試してください"
-            ),
-        ) from error
-
+    except Exception as exc:
+        raise HTTPException(422, '音源を解析できませんでした') from exc
     finally:
         await audio.close()
-
-        if temporary_path:
-            delete_temporary_file(
-                temporary_path,
-            )
-
-
-def validate_extension(
-    extension: str,
-) -> None:
-    if extension not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "MP3・WAV・M4Aのみ"
-                "対応しています"
-            ),
-        )
-
-
-async def save_upload_to_temporary_file(
-    audio: UploadFile,
-    extension: str,
-) -> tuple[str, int]:
-    total_size = 0
-
-    with tempfile.NamedTemporaryFile(
-        delete=False,
-        suffix=extension,
-    ) as temporary_file:
-        temporary_path = temporary_file.name
-
-        while True:
-            chunk = await audio.read(
-                CHUNK_SIZE,
-            )
-
-            if not chunk:
-                break
-
-            total_size += len(chunk)
-
-            if total_size > MAX_FILE_SIZE:
-                temporary_file.close()
-
-                delete_temporary_file(
-                    temporary_path,
-                )
-
-                raise HTTPException(
-                    status_code=413,
-                    detail=(
-                        "ファイルは200MB以下に"
-                        "してください"
-                    ),
-                )
-
-            temporary_file.write(chunk)
-
-    if total_size == 0:
-        delete_temporary_file(
-            temporary_path,
-        )
-
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "空のファイルは"
-                "解析できません"
-            ),
-        )
-
-    return temporary_path, total_size
-
-
-def analyze_file(
-    file_path: str,
-) -> dict[str, Any]:
-    duration = get_duration(
-        file_path,
-    )
-
-    audio_data, sample_rate = librosa.load(
-        file_path,
-        sr=TARGET_SAMPLE_RATE,
-        mono=True,
-        duration=MAX_ANALYSIS_SECONDS,
-    )
-
-    if audio_data.size == 0:
-        raise ValueError(
-            "Decoded audio is empty",
-        )
-
-    audio_data = remove_silence(
-        audio_data,
-    )
-
-    bpm_result = detect_tempo(
-        audio_data=audio_data,
-        sample_rate=sample_rate,
-    )
-
-    key_result = detect_key(
-        audio_data=audio_data,
-        sample_rate=sample_rate,
-    )
-
-    time_signature_result = (
-        detect_time_signature(
-            audio_data=audio_data,
-            sample_rate=sample_rate,
-            bpm=bpm_result["bpm"],
-        )
-    )
-
-    measure_count = estimate_measure_count(
-        duration=duration,
-        bpm=bpm_result["bpm"],
-        time_signature=(
-            time_signature_result[
-                "timeSignature"
-            ]
-        ),
-    )
-
-    return {
-        "engine": "librosa-basic-v1",
-        "durationSeconds": round(
-            duration,
-            3,
-        ),
-        "sampleRate": sample_rate,
-        "bpm": bpm_result["bpm"],
-        "bpmConfidence": (
-            bpm_result["confidence"]
-        ),
-        "key": key_result["key"],
-        "keyConfidence": (
-            key_result["confidence"]
-        ),
-        "keyRoot": key_result["root"],
-        "keyMode": key_result["mode"],
-        "fifths": key_result["fifths"],
-        "timeSignature": (
-            time_signature_result[
-                "timeSignature"
-            ]
-        ),
-        "timeSignatureConfidence": (
-            time_signature_result[
-                "confidence"
-            ]
-        ),
-        "measureCount": measure_count,
-        "analysisSeconds": min(
-            round(duration, 3),
-            MAX_ANALYSIS_SECONDS,
-        ),
-        "parts": {},
-        "notes": (
-            "現在は曲全体の基本解析です。"
-            "パート分離と音符解析は次工程です"
-        ),
-    }
-
-
-def get_duration(
-    file_path: str,
-) -> float:
-    try:
-        info = sf.info(
-            file_path,
-        )
-
-        if info.duration > 0:
-            return float(
-                info.duration,
-            )
-
-    except Exception:
-        pass
-
-    return float(
-        librosa.get_duration(
-            path=file_path,
-        )
-    )
-
-
-def remove_silence(
-    audio_data: np.ndarray,
-) -> np.ndarray:
-    trimmed_audio, _ = librosa.effects.trim(
-        audio_data,
-        top_db=40,
-    )
-
-    if trimmed_audio.size == 0:
-        return audio_data
-
-    return trimmed_audio
-
-
-def detect_tempo(
-    audio_data: np.ndarray,
-    sample_rate: int,
-) -> dict[str, int]:
-    onset_envelope = (
-        librosa.onset.onset_strength(
-            y=audio_data,
-            sr=sample_rate,
-        )
-    )
-
-    tempo_array, beat_frames = (
-        librosa.beat.beat_track(
-            onset_envelope=onset_envelope,
-            sr=sample_rate,
-            units="frames",
-        )
-    )
-
-    raw_tempo = float(
-        np.asarray(
-            tempo_array,
-        ).reshape(-1)[0]
-    )
-
-    bpm = normalize_bpm(
-        raw_tempo,
-    )
-
-    confidence = calculate_tempo_confidence(
-        onset_envelope=onset_envelope,
-        beat_frames=np.asarray(
-            beat_frames,
-        ),
-    )
-
-    return {
-        "bpm": bpm,
-        "confidence": confidence,
-    }
-
-
-def normalize_bpm(
-    tempo: float,
-) -> int:
-    if not np.isfinite(tempo):
-        return 120
-
-    while tempo < 60:
-        tempo *= 2
-
-    while tempo > 220:
-        tempo /= 2
-
-    return int(
-        round(tempo),
-    )
-
-
-def calculate_tempo_confidence(
-    onset_envelope: np.ndarray,
-    beat_frames: np.ndarray,
-) -> int:
-    if (
-        onset_envelope.size == 0
-        or beat_frames.size < 4
-    ):
-        return 20
-
-    valid_frames = beat_frames[
-        beat_frames < onset_envelope.size
-    ]
-
-    if valid_frames.size == 0:
-        return 20
-
-    beat_strength = float(
-        np.mean(
-            onset_envelope[
-                valid_frames
-            ]
-        )
-    )
-
-    overall_strength = float(
-        np.mean(
-            onset_envelope
-        )
-    )
-
-    if overall_strength <= 0:
-        return 20
-
-    ratio = (
-        beat_strength
-        / overall_strength
-    )
-
-    confidence = int(
-        round(
-            np.clip(
-                25 + ratio * 25,
-                20,
-                94,
-            )
-        )
-    )
-
-    return confidence
-
-
-def detect_key(
-    audio_data: np.ndarray,
-    sample_rate: int,
-) -> dict[str, Any]:
-    harmonic_audio, _ = librosa.effects.hpss(
-        audio_data,
-    )
-
-    chroma = librosa.feature.chroma_cqt(
-        y=harmonic_audio,
-        sr=sample_rate,
-        bins_per_octave=36,
-    )
-
-    chroma_average = np.mean(
-        chroma,
-        axis=1,
-    )
-
-    chroma_norm = normalize_vector(
-        chroma_average,
-    )
-
-    best_score = float("-inf")
-    second_score = float("-inf")
-    best_root = 0
-    best_mode = "major"
-
-    for root in range(12):
-        major_score = profile_score(
-            chroma=chroma_norm,
-            profile=MAJOR_PROFILE,
-            root=root,
-        )
-
-        minor_score = profile_score(
-            chroma=chroma_norm,
-            profile=MINOR_PROFILE,
-            root=root,
-        )
-
-        for score, mode in (
-            (major_score, "major"),
-            (minor_score, "minor"),
-        ):
-            if score > best_score:
-                second_score = best_score
-                best_score = score
-                best_root = root
-                best_mode = mode
-
-            elif score > second_score:
-                second_score = score
-
-    confidence = key_confidence(
-        best_score=best_score,
-        second_score=second_score,
-    )
-
-    mode_label = (
-        "Major"
-        if best_mode == "major"
-        else "Minor"
-    )
-
-    return {
-        "key": (
-            f"{KEY_NAMES[best_root]} "
-            f"{mode_label}"
-        ),
-        "root": KEY_NAMES[best_root],
-        "mode": best_mode,
-        "fifths": FIFTHS_BY_ROOT[
-            best_root
-        ],
-        "confidence": confidence,
-    }
-
-
-def normalize_vector(
-    values: np.ndarray,
-) -> np.ndarray:
-    values = np.asarray(
-        values,
-        dtype=np.float64,
-    )
-
-    norm = float(
-        np.linalg.norm(values)
-    )
-
-    if norm <= 0:
-        return values
-
-    return values / norm
-
-
-def profile_score(
-    chroma: np.ndarray,
-    profile: np.ndarray,
-    root: int,
-) -> float:
-    rotated_profile = np.roll(
-        profile,
-        root,
-    )
-
-    normalized_profile = normalize_vector(
-        rotated_profile,
-    )
-
-    return float(
-        np.dot(
-            chroma,
-            normalized_profile,
-        )
-    )
-
-
-def key_confidence(
-    best_score: float,
-    second_score: float,
-) -> int:
-    if not np.isfinite(best_score):
-        return 20
-
-    difference = max(
-        0.0,
-        best_score - second_score,
-    )
-
-    confidence = int(
-        round(
-            np.clip(
-                40 + difference * 350,
-                35,
-                92,
-            )
-        )
-    )
-
-    return confidence
-
-
-def detect_time_signature(
-    audio_data: np.ndarray,
-    sample_rate: int,
-    bpm: int,
-) -> dict[str, Any]:
-    onset_envelope = (
-        librosa.onset.onset_strength(
-            y=audio_data,
-            sr=sample_rate,
-        )
-    )
-
-    _, beat_frames = (
-        librosa.beat.beat_track(
-            onset_envelope=onset_envelope,
-            sr=sample_rate,
-            bpm=bpm,
-            units="frames",
-        )
-    )
-
-    beat_frames = np.asarray(
-        beat_frames,
-        dtype=int,
-    )
-
-    valid_frames = beat_frames[
-        beat_frames
-        < onset_envelope.size
-    ]
-
-    if valid_frames.size < 12:
-        return {
-            "timeSignature": "4/4",
-            "confidence": 35,
-        }
-
-    beat_strengths = onset_envelope[
-        valid_frames
-    ]
-
-    scores = {
-        "2/4": meter_score(
-            beat_strengths,
-            2,
-        ),
-        "3/4": meter_score(
-            beat_strengths,
-            3,
-        ),
-        "4/4": meter_score(
-            beat_strengths,
-            4,
-        ),
-    }
-
-    best_signature = max(
-        scores,
-        key=scores.get,
-    )
-
-    ordered_scores = sorted(
-        scores.values(),
-        reverse=True,
-    )
-
-    difference = (
-        ordered_scores[0]
-        - ordered_scores[1]
-    )
-
-    confidence = int(
-        round(
-            np.clip(
-                35 + difference * 40,
-                35,
-                75,
-            )
-        )
-    )
-
-    return {
-        "timeSignature": best_signature,
-        "confidence": confidence,
-    }
-
-
-def meter_score(
-    beat_strengths: np.ndarray,
-    meter: int,
-) -> float:
-    grouped_strengths: list[float] = []
-
-    for position in range(meter):
-        values = beat_strengths[
-            position::meter
-        ]
-
-        if values.size == 0:
-            grouped_strengths.append(
-                0.0,
-            )
-        else:
-            grouped_strengths.append(
-                float(
-                    np.mean(values)
-                )
-            )
-
-    first_beat = grouped_strengths[0]
-
-    other_beats = (
-        grouped_strengths[1:]
-    )
-
-    others_average = (
-        float(
-            np.mean(other_beats)
-        )
-        if other_beats
-        else 0.0
-    )
-
-    return (
-        first_beat
-        - others_average
-    )
-
-
-def estimate_measure_count(
-    duration: float,
-    bpm: int,
-    time_signature: str,
-) -> int:
-    beats, beat_type = [
-        int(value)
-        for value
-        in time_signature.split("/")
-    ]
-
-    quarter_notes_per_measure = (
-        beats
-        * (4 / beat_type)
-    )
-
-    total_quarter_notes = (
-        duration
-        * bpm
-        / 60
-    )
-
-    measure_count = round(
-        total_quarter_notes
-        / quarter_notes_per_measure
-    )
-
-    return max(
-        1,
-        int(measure_count),
-    )
-
-
-def delete_temporary_file(
-    file_path: str,
-) -> None:
-    try:
-        os.remove(
-            file_path,
-        )
-    except OSError:
-        pass
+        if temp_path:
+            try: os.remove(temp_path)
+            except OSError: pass
+
+app.mount('/static', StaticFiles(directory='static'), name='static')
+@app.get('/', include_in_schema=False)
+async def home():
+    return FileResponse('static/index.html')

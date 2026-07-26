@@ -1,35 +1,15 @@
-# Brass Studio Analysis API
+# Brass Studio Ver.1.1
 
-Brass Studio のフロントエンドと解析エンジンを接続する FastAPI サーバーです。
+Render上でBPM・Key・拍子・小節数を解析し、MuseScore 4用MusicXMLの空スコアを生成します。
 
-## 現在の機能
+## ファイル構成
+- main.py
+- requirements.txt
+- Dockerfile
+- render.yaml
+- static/index.html
+- static/style.css
+- static/app.js
 
-- `/health` の疎通確認
-- MP3 / WAV / M4A のアップロード受付
-- 200MB のサイズ制限
-- CORS 対応
-- アップロード成功結果の JSON 返却
-
-現段階は接続確認用です。音源分離・音高解析・MusicXML生成は次の工程で追加します。
-
-## Render
-
-このリポジトリを Render の Web Service に接続してください。
-
-- Runtime: Docker
-- Health Check Path: `/health`
-
-デプロイ後:
-
-- `https://あなたのURL.onrender.com/health`
-- `https://あなたのURL.onrender.com/docs`
-
-## CORS
-
-開発中は `ALLOWED_ORIGINS=*` です。
-
-公開時は Render の Environment で以下のように設定してください。
-
-```text
-ALLOWED_ORIGINS=https://あなたのStackBlitz公開URL
-```
+## 現在の制限
+パート別の実音符採譜はまだ含まれていません。Ver.1.1のMusicXMLは解析結果を反映した空スコアです。

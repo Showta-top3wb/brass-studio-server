@@ -1,9 +1,5 @@
 services:
   - type: web
-    name: brass-studio-api
+    name: brass-studio
     runtime: docker
-    plan: free
     healthCheckPath: /health
-    envVars:
-      - key: ALLOWED_ORIGINS
-        value: "*"
