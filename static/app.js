@@ -156,14 +156,19 @@ async function analyze() {
   ui.sourceError.textContent = "";
 
   try {
-    const formData = new FormData();
+    const pingResponse = await fetch(
+  `${API_BASE_URL}/ping`,
+  {
+    method: "POST",
+    mode: "cors"
+  }
+);
 
-    formData.append(
-      "audio",
-      state.file,
-      state.file.name
-    );
-
+if (!pingResponse.ok) {
+  throw new Error(
+    `接続テスト失敗（HTTP ${pingResponse.status}）`
+  );
+}
     const query = new URLSearchParams({
       parts: selected().join(","),
       time_signature: ui.timeSignature.value,
