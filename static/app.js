@@ -149,26 +149,34 @@ update();
 async function analyze() {
   ui.analyzeButton.disabled = true;
   ui.progressCard.hidden = false;
-  ui.progressLabel.textContent =
-    "アップロード準備中";
-
+  ui.progressLabel.textContent = "API接続確認中";
   ui.resultCard.hidden = true;
   ui.sourceError.textContent = "";
 
   try {
     const pingResponse = await fetch(
-  `${API_BASE_URL}/ping`,
-  {
-    method: "POST",
-    mode: "cors"
-  }
-);
+      `${API_BASE_URL}/ping`,
+      {
+        method: "POST",
+        mode: "cors",
+        cache: "no-store"
+      }
+    );
 
-if (!pingResponse.ok) {
-  throw new Error(
-    `接続テスト失敗（HTTP ${pingResponse.status}）`
-  );
-}
+    if (!pingResponse.ok) {
+      throw new Error(
+        `接続テスト失敗（HTTP ${pingResponse.status}）`
+      );
+    }
+
+    const formData = new FormData();
+
+    formData.append(
+      "audio",
+      state.file,
+      state.file.name
+    );
+
     const query = new URLSearchParams({
       parts: selected().join(","),
       time_signature: ui.timeSignature.value,
@@ -186,6 +194,9 @@ if (!pingResponse.ok) {
         )
       );
     }
+
+    ui.progressLabel.textContent =
+      "アップロード準備中";
 
     const result = await uploadAudio(
       `${API_BASE_URL}/analyze?${query.toString()}`,
@@ -221,7 +232,8 @@ if (!pingResponse.ok) {
     ui.resultCard.hidden = false;
 
     showToast("解析が完了しました");
-      } catch (error) {
+
+  } catch (error) {
     console.error(error);
 
     ui.sourceError.textContent =
@@ -448,6 +460,7 @@ ${result.analysis.measureCount} 小節
 
   popup.document.close();
 }
+
 function showToast(message) {
   if (!ui.toast) {
     return;
