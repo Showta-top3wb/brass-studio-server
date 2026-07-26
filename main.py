@@ -187,7 +187,34 @@ async def ping() -> dict[str, str]:
         "message": "POST received",
         "version": APP_VERSION,
     }
+@app.post("/upload-test")
+async def upload_test(
+    audio: Annotated[UploadFile, File(...)],
+):
+    size = 0
 
+    while True:
+        chunk = await audio.read(CHUNK_SIZE)
+
+        if not chunk:
+            break
+
+        size += len(chunk)
+
+        if size > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail="ファイルは200MB以下にしてください",
+            )
+
+    await audio.close()
+
+    return {
+        "status": "ok",
+        "filename": audio.filename,
+        "size": size,
+        "version": APP_VERSION,
+    }
 
 def clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
