@@ -1,5 +1,5 @@
 services:
   - type: web
-    name: brass-studio
+    name: brass-studio-api
     runtime: docker
     healthCheckPath: /health
