@@ -19,6 +19,7 @@ app.add_middleware(
 )
 
 ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a"}
+ANALYSIS_SECONDS = 30
 
 
 @app.get("/health")
@@ -33,14 +34,13 @@ async def health():
 async def upload(file: UploadFile = File(...)):
     filename = file.filename or ""
     extension = Path(filename).suffix.lower()
+    temp_path = None
 
     if extension not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
             detail="MP3、WAV、M4Aファイルのみ対応しています。",
         )
-
-    temp_path = None
 
     try:
         print(f"Upload started: {filename}", flush=True)
@@ -54,40 +54,60 @@ async def upload(file: UploadFile = File(...)):
 
         print(f"File saved: {temp_path}", flush=True)
 
-        try:
-            audio_info = sf.info(temp_path)
-            duration = float(audio_info.duration)
-            print("Duration read with soundfile", flush=True)
-        except Exception:
-            duration = float(librosa.get_duration(path=temp_path))
-            print("Duration read with librosa", flush=True)
+        audio_info = sf.info(temp_path)
+        duration = float(audio_info.duration)
+        sample_rate = int(audio_info.samplerate)
 
-        print("Loading audio for BPM analysis", flush=True)
-
-        audio, sample_rate = librosa.load(
-            temp_path,
-            sr=22050,
-            mono=True,
-            duration=30.0,
+        print(
+            f"Audio info: duration={duration}, sample_rate={sample_rate}",
+            flush=True,
         )
+
+        frames_to_read = min(
+            int(audio_info.frames),
+            sample_rate * ANALYSIS_SECONDS,
+        )
+
+        print(
+            f"Reading first {ANALYSIS_SECONDS} seconds with soundfile",
+            flush=True,
+        )
+
+        audio, sample_rate = sf.read(
+            temp_path,
+            frames=frames_to_read,
+            dtype="float32",
+            always_2d=True,
+        )
+
+        print(f"Audio loaded: shape={audio.shape}", flush=True)
 
         if audio.size == 0:
             raise ValueError("音声データが空です。")
 
-        audio = librosa.util.normalize(audio)
+        audio = np.mean(audio, axis=1)
+
+        peak = float(np.max(np.abs(audio)))
+
+        if peak > 0:
+            audio = audio / peak
+
+        print("Starting BPM analysis", flush=True)
 
         onset_envelope = librosa.onset.onset_strength(
             y=audio,
             sr=sample_rate,
+            hop_length=512,
         )
 
         tempo, _ = librosa.beat.beat_track(
             onset_envelope=onset_envelope,
             sr=sample_rate,
+            hop_length=512,
         )
 
-        tempo_values = np.asarray(tempo).flatten()
-        bpm = float(tempo_values[0]) if tempo_values.size > 0 else 0.0
+        tempo_values = np.asarray(tempo).reshape(-1)
+        bpm = float(tempo_values[0]) if tempo_values.size else 0.0
 
         if not np.isfinite(bpm) or bpm <= 0:
             bpm = 0.0
