@@ -68,6 +68,7 @@ async def upload(file: UploadFile = File(...)):
             temp_path,
             sr=22050,
             mono=True,
+            duration=30.0,
         )
 
         if audio.size == 0:
