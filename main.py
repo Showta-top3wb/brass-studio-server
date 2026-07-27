@@ -1,6 +1,8 @@
 from pathlib import Path
 import shutil
 import tempfile
+import subprocess
+import sys
 
 import librosa
 import soundfile as sf
@@ -26,7 +28,45 @@ async def health():
         "status": "ok",
         "phase": "2-preparation",
     }
+@app.get("/demucs-health")
+async def demucs_health():
+    try:
+        process = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "demucs",
+                "--help",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
 
+        if process.returncode != 0:
+            raise RuntimeError(
+                process.stderr.strip()
+                or process.stdout.strip()
+                or "Demucsを起動できませんでした。"
+            )
+
+        return {
+            "status": "ok",
+            "demucs": "available",
+        }
+
+    except subprocess.TimeoutExpired as error:
+        raise HTTPException(
+            status_code=504,
+            detail="Demucsの起動確認がタイムアウトしました。",
+        ) from error
+
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Demucsを起動できませんでした: {error}",
+        ) from error
 
 @app.post("/upload")
 async def upload(file: UploadFile = File(...)):
