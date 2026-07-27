@@ -3,11 +3,12 @@ import shutil
 import tempfile
 
 import librosa
+import numpy as np
 import soundfile as sf
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Brass Studio 2.0 Phase 1")
+app = FastAPI(title="Brass Studio 2.0 Phase 2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -22,7 +23,10 @@ ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a"}
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "phase": "2-1",
+    }
 
 
 @app.post("/upload")
@@ -58,13 +62,44 @@ async def upload(file: UploadFile = File(...)):
             duration = float(librosa.get_duration(path=temp_path))
             print("Duration read with librosa", flush=True)
 
-        print(f"Upload completed: {duration}", flush=True)
+        print("Loading audio for BPM analysis", flush=True)
+
+        audio, sample_rate = librosa.load(
+            temp_path,
+            sr=22050,
+            mono=True,
+        )
+
+        if audio.size == 0:
+            raise ValueError("音声データが空です。")
+
+        audio = librosa.util.normalize(audio)
+
+        onset_envelope = librosa.onset.onset_strength(
+            y=audio,
+            sr=sample_rate,
+        )
+
+        tempo, _ = librosa.beat.beat_track(
+            onset_envelope=onset_envelope,
+            sr=sample_rate,
+        )
+
+        tempo_values = np.asarray(tempo).flatten()
+        bpm = float(tempo_values[0]) if tempo_values.size > 0 else 0.0
+
+        if not np.isfinite(bpm) or bpm <= 0:
+            bpm = 0.0
+
+        print(f"BPM detected: {bpm}", flush=True)
+        print("Upload completed", flush=True)
 
         return {
             "status": "success",
             "filename": filename,
             "format": extension.lstrip("."),
             "duration": round(duration, 3),
+            "bpm": round(bpm, 1),
         }
 
     except Exception as error:
