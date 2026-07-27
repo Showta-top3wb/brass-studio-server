@@ -4,3 +4,6 @@ python-multipart
 librosa
 soundfile
 numpy
+demucs
+torch
+torchaudio
